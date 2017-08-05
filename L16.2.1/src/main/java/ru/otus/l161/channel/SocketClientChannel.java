@@ -12,6 +12,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,11 +32,12 @@ public class SocketClientChannel implements MsgChannel {
     private final BlockingQueue<Msg> input = new LinkedBlockingQueue<>();
 
     private final ExecutorService executor;
+    private final Socket socket;
+    private final List<Runnable> shutdownRegistrations;
 
-    private final Socket client;
-
-    public SocketClientChannel(Socket client) {
-        this.client = client;
+    public SocketClientChannel(Socket socket) {
+        this.socket = socket;
+        this.shutdownRegistrations = new ArrayList<>();
         this.executor = Executors.newFixedThreadPool(WORKERS_COUNT);
     }
 
@@ -43,8 +46,12 @@ public class SocketClientChannel implements MsgChannel {
         executor.execute(this::receiveMessage);
     }
 
+    public void addShutdownRegistration(Runnable runnable) {
+        this.shutdownRegistrations.add(runnable);
+    }
+
     private void receiveMessage() {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()))) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
             String inputLine;
             StringBuilder stringBuilder = new StringBuilder();
             while ((inputLine = in.readLine()) != null) {
@@ -57,10 +64,10 @@ public class SocketClientChannel implements MsgChannel {
                     stringBuilder = new StringBuilder();
                 }
             }
-        } catch (IOException | ParseException e) {
+        } catch (IOException | ParseException | ClassNotFoundException e) {
             logger.log(Level.SEVERE, e.getMessage());
-        } catch (ClassNotFoundException e) {
-            e.printStackTrace();
+        } finally {
+            close();
         }
     }
 
@@ -73,9 +80,9 @@ public class SocketClientChannel implements MsgChannel {
     }
 
     private void sendMessage() {
-        try (PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
-            while (client.isConnected()) {
-                Msg msg = output.take();
+        try (PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+            while (socket.isConnected()) {
+                Msg msg = output.take(); //blocks
                 String json = new Gson().toJson(msg);
                 out.println(json);
                 out.println(); //end of message
@@ -101,7 +108,10 @@ public class SocketClientChannel implements MsgChannel {
     }
 
     @Override
-    public void close() throws IOException {
+    public void close() {
+        shutdownRegistrations.forEach(Runnable::run);
+        shutdownRegistrations.clear();
+
         executor.shutdown();
     }
 }
